@@ -1071,5 +1071,12 @@
   "field.free_trigger.when_affinity": "好感度人物",
   "field.free_trigger.when_affinity_min": "好感度下限",
   "field.free_trigger.note": "備註（只給自己看）",
-  "form.return_free_mode": "（返回自由模式）"
+  "form.return_free_mode": "（返回自由模式）",
+  "nav.move_up_many": "上移 {n} 個步驟",
+  "nav.move_down_many": "下移 {n} 個步驟",
+  "nav.moved_many": "已移動 {n} 個步驟",
+  "nav.added_death": "已新增死亡畫面（專用編號 {id}）",
+  "nav.added_hide": "已新增 {name} 的人物退場",
+  "form.exit_character": "退場",
+  "form.exit_character_tip": "為當前人物自動新增一個「人物退場」步驟"
 }

@@ -1075,5 +1075,12 @@
   "field.free_trigger.when_affinity": "好感度のキャラ",
   "field.free_trigger.when_affinity_min": "好感度の下限",
   "field.free_trigger.note": "メモ（自分用）",
-  "form.return_free_mode": "（フリーモードへ戻る）"
+  "form.return_free_mode": "（フリーモードへ戻る）",
+  "nav.move_up_many": "{n} 件を上へ移動",
+  "nav.move_down_many": "{n} 件を下へ移動",
+  "nav.moved_many": "{n} 件を移動しました",
+  "nav.added_death": "死亡画面を追加しました（専用番号 {id}）",
+  "nav.added_hide": "{name} の退場を追加しました",
+  "form.exit_character": "退場",
+  "form.exit_character_tip": "現在の人物の退場ステップを自動で追加します"
 }

@@ -1747,6 +1747,22 @@ def character_portraits(editor_data: dict, char_id: str) -> list[str]:
     return list(DEFAULT_PORTRAITS)
 
 
+def next_death_id(story: dict) -> str:
+    """死亡画面「专用编号」的下一个可用值：当前剧情里最大 death_id + 1，起始 900001。
+
+    mod 专属死亡 id 从 900001 起（官方是 6 位、9 开头，如 910021），自动递增避免撞号；
+    现有节点用非数字编号（如官方 id 直接填了别的格式）时忽略不计。
+    """
+    used: list[int] = []
+    for node in story.get("nodes") or []:
+        if not isinstance(node, dict) or node.get("type") != "death":
+            continue
+        raw = str(node.get("death_id") or "").strip()
+        if raw.isdigit():
+            used.append(int(raw))
+    return str((max(used) + 1) if used else 900001)
+
+
 def new_node(node_type: str, node_id: str, editor_data: dict | None = None) -> dict:
     """新节点工厂：按契约默认值生成节点 dict。"""
     if node_type not in NODE_SCHEMAS:

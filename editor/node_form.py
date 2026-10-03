@@ -559,6 +559,18 @@ class NodeForm(QScrollArea):
             row.addWidget(w, 1)
             row.addWidget(browse)
             row.addWidget(manage)
+            if str(node.get("type") or "") == "show":
+                # 登场步骤的快捷退场：一键给当前人物追加一个「人物退场」步骤
+                exit_btn = QPushButton(t("form.exit_character"))
+                exit_btn.setMinimumHeight(28)
+                exit_btn.setSizePolicy(
+                    QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+                )
+                exit_btn.setToolTip(t("form.exit_character_tip"))
+                exit_btn.clicked.connect(
+                    lambda _checked=False, n=node, k=key: self._request_hide_for(n, k)
+                )
+                row.addWidget(exit_btn)
             return box
         if kind == "portrait":
             char_id = node.get("character", "")
@@ -2447,6 +2459,12 @@ class NodeForm(QScrollArea):
         if mode == MODE_CHARACTER:
             # 人物换了，表情清单要跟着换成新角色的
             self._rebuild_current()
+
+    def _request_hide_for(self, node: dict, key: str) -> None:
+        """「人物登场」步骤里点「退场」：请求主窗口为当前人物追加一个退场步骤。"""
+        handler = getattr(self.window(), "add_hide_for_character", None)
+        if callable(handler):
+            handler(str(node.get(key) or ""))
 
     def _on_character_changed(
         self, node: dict, key: str, combo: QComboBox, text: str

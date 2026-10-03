@@ -1075,5 +1075,12 @@
   "field.free_trigger.when_affinity": "호감도 캐릭터",
   "field.free_trigger.when_affinity_min": "호감도 하한",
   "field.free_trigger.note": "메모(자신만 보기)",
-  "form.return_free_mode": "(자유 모드로 돌아가기)"
+  "form.return_free_mode": "(자유 모드로 돌아가기)",
+  "nav.move_up_many": "{n}개 스텝 위로 이동",
+  "nav.move_down_many": "{n}개 스텝 아래로 이동",
+  "nav.moved_many": "{n}개 스텝을 이동했습니다",
+  "nav.added_death": "사망 화면을 추가했습니다(전용 번호 {id})",
+  "nav.added_hide": "{name} 퇴장을 추가했습니다",
+  "form.exit_character": "퇴장",
+  "form.exit_character_tip": "현재 인물의 퇴장 스텝을 자동으로 추가합니다"
 }

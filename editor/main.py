@@ -1033,6 +1033,8 @@ class MainWindow(
         for shortcut, slot in (
             (QKeySequence.StandardKey.Copy, self._copy_selected_nodes),
             (QKeySequence.StandardKey.Paste, self._paste_nodes),
+            (QKeySequence("Alt+Up"), lambda: self._move_node(-1)),
+            (QKeySequence("Alt+Down"), lambda: self._move_node(1)),
         ):
             action = QAction(self)
             action.setShortcut(shortcut)
@@ -2281,6 +2283,11 @@ class MainWindow(
         node = models.new_node(
             node_type, models.make_node_id(self.story, node_type), self.editor_data
         )
+        if node_type == "death":
+            # 专用编号自动递增（900001 → 900002 …），避免手动填或撞号
+            node["death_id"] = models.next_death_id(self.story)
+            self._insert_node(node, t("nav.added_death", id=node["death_id"]))
+            return
         self._insert_node(node)
 
     def _add_ending_card(self) -> None:
@@ -2296,6 +2303,17 @@ class MainWindow(
             }
         )
         self._insert_node(node, "已添加汗青书结局；请填写标题和正文")
+
+    def add_hide_for_character(self, character: str) -> None:
+        """「人物登场」步骤的快捷退场按钮：为指定人物追加一个「人物退场」步骤。"""
+        if not character:
+            return
+        node = models.new_node(
+            "hide", models.make_node_id(self.story, "hide"), self.editor_data
+        )
+        node["character"] = character
+        name = models.character_name(self.editor_data, character)
+        self._insert_node(node, t("nav.added_hide", name=name))
 
     def _insert_node(self, node: dict, message: str | None = None) -> None:
         self._record_discrete()
@@ -2350,16 +2368,82 @@ class MainWindow(
             self.story["start"] = str(nodes[0].get("id") or "")
 
     def _move_node(self, delta: int) -> None:
+        """上移 / 下移选中步骤；多选时按连续块整体平移并保持块内顺序。"""
         nodes = self.story.get("nodes", [])
-        row = self._selected_node_index()
-        to = row + delta
-        if not (0 <= row < len(nodes) and 0 <= to < len(nodes)):
+        indexes = self._selected_node_indexes()
+        if not indexes:
+            current = self._selected_node_index()
+            if 0 <= current < len(nodes):
+                indexes = [current]
+        indexes = sorted(i for i in indexes if 0 <= i < len(nodes))
+        if not indexes:
             return
+        # 整块顶到边界就不动
+        if delta < 0 and indexes[0] <= 0:
+            return
+        if delta > 0 and indexes[-1] >= len(nodes) - 1:
+            return
+        # 把选中下标切成连续块：逐块整体平移 1 格（块内顺序不变，用交换会错位）
+        blocks: list[list[int]] = []
+        for i in indexes:
+            if blocks and i == blocks[-1][-1] + 1:
+                blocks[-1].append(i)
+            else:
+                blocks.append([i])
         self._record_discrete()
         old_front = str(nodes[0].get("id") or "")
-        nodes[row], nodes[to] = nodes[to], nodes[row]
+        if delta < 0:
+            for block in blocks:  # 上移：从最上面的块开始
+                lo, hi = block[0], block[-1]
+                carry = nodes[lo - 1]
+                for i in range(lo, hi + 1):
+                    nodes[i - 1] = nodes[i]
+                nodes[hi] = carry
+        else:
+            for block in reversed(blocks):  # 下移：从最下面的块开始
+                lo, hi = block[0], block[-1]
+                carry = nodes[hi + 1]
+                for i in range(hi, lo - 1, -1):
+                    nodes[i + 1] = nodes[i]
+                nodes[lo] = carry
         self._follow_start_on_front_change(old_front)
-        self._refresh_all(select_row=to)
+        moved = sorted(i + delta for i in indexes)
+        self._refresh_all(select_row=moved[0])
+        self._select_node_indexes(moved)
+        if len(moved) > 1:
+            self.statusBar().showMessage(t("nav.moved_many", n=len(moved)), 2500)
+        else:
+            self.statusBar().showMessage(t("nav.moved", n=moved[0] + 1), 2500)
+
+    def _select_node_indexes(self, indexes: list[int]) -> None:
+        """按 nodes[] 下标批量选中步骤行（多选移动后保持选区）。"""
+        wanted = {int(i) for i in indexes}
+        self.node_list.blockSignals(True)
+        try:
+            rows: list[int] = []
+            for row in range(self.node_list.count()):
+                item = self.node_list.item(row)
+                if item is None:
+                    continue
+                data = item.data(self._ROLE_KIND)
+                if (
+                    isinstance(data, int)
+                    and not isinstance(data, bool)
+                    and int(data) in wanted
+                ):
+                    rows.append(row)
+            self.node_list.clearSelection()
+            if rows:
+                # 必须先 setCurrentItem 再逐项 setSelected：反过来的话
+                # setCurrentItem 会把最后一个选中项清掉。
+                self.node_list.setCurrentItem(self.node_list.item(rows[0]))
+                for row in rows:
+                    item = self.node_list.item(row)
+                    if item is not None:
+                        item.setSelected(True)
+                self.node_list.scrollToItem(self.node_list.item(rows[0]))
+        finally:
+            self.node_list.blockSignals(False)
 
     def _on_steps_moved(self, from_index: int, insert_index: int) -> None:
         nodes = self.story.get("nodes", [])
@@ -2532,8 +2616,14 @@ class MainWindow(
         menu.addAction(t("nav.duplicate_here"), self._duplicate_node_in_place)
         menu.addAction(t("nav.delete"), self._delete_node)
         menu.addSeparator()
-        menu.addAction(t("nav.move_up"), lambda: self._move_node(-1))
-        menu.addAction(t("nav.move_down"), lambda: self._move_node(1))
+        menu.addAction(
+            t("nav.move_up_many", n=selected) if selected > 1 else t("nav.move_up"),
+            lambda: self._move_node(-1),
+        )
+        menu.addAction(
+            t("nav.move_down_many", n=selected) if selected > 1 else t("nav.move_down"),
+            lambda: self._move_node(1),
+        )
         menu.exec(self.node_list.mapToGlobal(pos))
 
     def _toggle_structure_item(self, item: QListWidgetItem) -> None:
