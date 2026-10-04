@@ -15,13 +15,12 @@
     父 Canvas 顶部中心 + anchoredPosition 处。
   - 因此 x 比例 = 0.5 + anchoredPosition.x / 1920；
     脚底距画面顶部像素 = -anchoredPosition.y（1080 参考高）。
-  - 角色容器整套复制锚点的 RectTransform（anchoredPosition / sizeDelta / anchor /
-    pivot），立绘 Image 设 preserveAspect=true 并拉伸填满容器 —— 即在锚点矩形内
-    等比缩放居中。多数站位矩形是整屏 1920×1080，故竖构图立绘按高受限、正好满屏。
+  - 站位只用来锚定立绘的横向位置与脚底线；立绘在预览里按固定比例绘制，
+    不跟随锚点矩形的 sizeDelta（不同立绘画布尺寸不一致，跟随会导致忽大忽小）。
 
 输出：
   data/stage_positions.json = { "schema": 1, "reference": {...},
-    "positions": { "<id>": {"x": 0..1(可越界), "feet": 顶部起比例, "w":.., "h":..} } }
+    "positions": { "<id>": {"x": 0..1(可越界), "feet": 顶部起比例} } }
 """
 
 from __future__ import annotations
@@ -127,10 +126,6 @@ def extract(level_path: Path) -> dict:
             "x": round(0.5 + ap_x / REF_WIDTH, 6),
             # 脚底距画面顶部（1080 参考）：Canvas 顶部中心 + anchoredPosition.y
             "feet": round(-ap_y / REF_HEIGHT, 6),
-            # 锚点矩形尺寸（舞台单位）：角色容器整套复制它，立绘在其中等比居中，
-            # 因此这也是立绘的可视外框（见 preview.position_rect）。
-            "w": round(float(d.m_SizeDelta.x), 6),
-            "h": round(float(d.m_SizeDelta.y), 6),
         }
 
     return positions

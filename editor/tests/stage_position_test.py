@@ -76,22 +76,20 @@ def test_json_matches_fallback() -> None:
     print("[一致性] JSON 与内置兜底值逐项一致")
 
 
-def test_anchor_box_sizes() -> None:
-    """锚点矩形（立绘可视外框）应与游戏一致：常规站位整屏，其余按场景。"""
-    assert preview.position_rect("L1")[2:] == (1920.0, 1080.0, True)
-    assert preview.position_rect("Talk")[2:] == (1920.0, 1245.0, True)
-    assert preview.position_rect("BC2")[2:] == (3500.0, 1920.0, True)
-    # 未知站位兜底：整屏尺寸、不识别
-    _x, _f, w, h, known = preview.position_rect("不存在的站位")
-    assert (w, h, known) == (1920.0, 1080.0, False)
-    print("[锚点矩形] 整屏 / Talk / BC2 / 未知兜底 均正确")
+def test_unknown_position_fallback() -> None:
+    """未知站位兜底：中央、脚底在底边、不标记为已识别。"""
+    assert preview.position_anchor("不存在的站位") == (0.5, 1.002778, False)
+    # M / C 是显式别名，视为已识别
+    assert preview.position_anchor("M") == (0.5, 1.002778, True)
+    assert preview.position_anchor("c") == (0.5, 1.002778, True)
+    print("[未知站位] 兜底中央/底边，M、C 视为已识别")
 
 
 def main_fn() -> int:
     test_table_covers_all_positions()
     test_x_matches_authoritative_scene()
     test_feet_depth_order()
-    test_anchor_box_sizes()
+    test_unknown_position_fallback()
     test_json_matches_fallback()
     print("\nstage_position_test 全部通过")
     return 0
