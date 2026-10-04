@@ -19,7 +19,7 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QDrag, QFont, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -124,19 +124,34 @@ _ROLE_KIND = Qt.ItemDataRole.UserRole
 
 
 class StepListWidget(QListWidget):
-    """步骤树：可拖动重排、可 Shift/Ctrl 多选；第 0 行「章节设置」固定不参与。"""
+    """步骤树：自实现的鼠标拖拽重排 + Shift/Ctrl 多选；第 0 行「章节设置」固定不参与。
 
-    steps_moved = Signal(int, int)  # from_index, insert_index（均为 nodes[] 下标语义）
+    为什么不用 Qt 原生拖放（`QDrag.exec`）：原生拖放期间鼠标被窗口系统 / OLE 抢占，
+    滚轮事件到不了列表，长列表里没法「一边滚一边找落点」。改成自己处理
+    按下 → 移动 → 释放后，拖拽过程就是普通鼠标操作，滚轮照常滚动（无需自动滚动）。
+    """
+
+    steps_moved = Signal(list, int)  # 源下标列表, 插入下标（均为 nodes[] 下标语义）
+
+    _DRAG_HIGHLIGHT = QColor(90, 160, 255, 48)  # 被拖动行的底色
+    _DROP_LINE = QColor(90, 160, 255)  # 落点指示线
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
-        self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        # 多选用于「复制多个步骤」；拖动仍然只搬当前这一项（见 startDrag）。
+        # 拖拽由本类自己实现（见 mousePress / mouseMove / mouseRelease），关掉原生
+        # 拖放才能在拖拽过程中保留滚轮滚动。
+        self.setDragEnabled(False)
+        self.setAcceptDrops(False)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        # 多选既用于「复制多个步骤」，也用于拖拽整块搬移 / 批量删除。
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._press_row = -1
+        self._press_pos = None
+        self._last_pos = None
+        self._drag_candidate = False
+        self._dragging = False
+        self._drag_rows: list[int] = []
+        self._drop_row: int | None = None
 
     @staticmethod
     def _is_chapter(item: QListWidgetItem | None) -> bool:
@@ -155,83 +170,168 @@ class StepListWidget(QListWidget):
             return QItemSelectionModel.SelectionFlag.NoUpdate
         return super().selectionCommand(index, event)
 
-    def startDrag(self, supported_actions) -> None:  # noqa: N802
-        item = self.currentItem()
-        if self._is_chapter(item) or item is None:
-            return
-        src = item.data(_ROLE_KIND)
-        if not isinstance(src, int):
-            return
-        indexes = self.selectedIndexes()
-        mime = self.model().mimeData(indexes) if indexes else None
-        if mime is None:
-            return
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        rect = self.visualItemRect(item)
-        grabbed = self.viewport().grab(rect)
-        if not grabbed.isNull():
-            drag.setPixmap(grabbed)
-            drag.setHotSpot(rect.center() - rect.topLeft())
-        # 自己 exec，不要走 QListWidget.startDrag：它在 MoveAction 成功后会删源行。
-        drag.exec(Qt.DropAction.MoveAction, Qt.DropAction.MoveAction)
+    def _selected_step_indexes(self) -> list[int]:
+        """当前选中的步骤在 nodes[] 里的下标（升序）；分区/章节行不计入。"""
+        out: list[int] = []
+        for row in range(self.count()):
+            item = self.item(row)
+            if item is None or not item.isSelected():
+                continue
+            data = item.data(_ROLE_KIND)
+            if isinstance(data, int) and not isinstance(data, bool):
+                out.append(int(data))
+        return sorted(out)
 
-    def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.source() is self:
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
-            return
-        event.ignore()
+    # ------------------------------------------------- 自实现的鼠标拖拽（滚轮可用）
+    @staticmethod
+    def _is_step(item: QListWidgetItem | None) -> bool:
+        if item is None:
+            return False
+        data = item.data(_ROLE_KIND)
+        return isinstance(data, int) and not isinstance(data, bool)
 
-    def dragMoveEvent(self, event) -> None:  # noqa: N802
-        super().dragMoveEvent(event)
-        if event.source() is self:
-            event.setDropAction(Qt.DropAction.MoveAction)
-            event.accept()
-            return
-        event.ignore()
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            item = self.itemAt(pos)
+            self._press_row = self.row(item) if item is not None else -1
+            self._press_pos = pos
+            self._last_pos = pos
+            self._drag_candidate = self._is_step(item)
+            self._dragging = False
+            self._drop_row = None
+        super().mousePressEvent(event)
 
-    def dropEvent(self, event) -> None:  # noqa: N802
-        if event.source() is not self:
-            event.ignore()
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_candidate and (event.buttons() & Qt.MouseButton.LeftButton):
+            pos = event.position().toPoint()
+            self._last_pos = pos
+            if not self._dragging:
+                start = self._press_pos or pos
+                if (pos - start).manhattanLength() < QApplication.startDragDistance():
+                    # 还没越过拖动阈值：不交给基类，避免橡皮筋选择等干扰
+                    return
+                self._dragging = True
+                self._drag_rows = [
+                    row
+                    for row in range(self.count())
+                    if self.item(row) is not None and self.item(row).isSelected()
+                ]
+                if self._press_row not in self._drag_rows:
+                    self._drag_rows = [self._press_row]
+                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._drop_row = self._drop_row_at(pos)
+            self.viewport().update()
             return
-        src_item = self.currentItem()
-        if self._is_chapter(src_item) or src_item is None:
-            event.ignore()
-            return
-        src = src_item.data(_ROLE_KIND)
-        if not isinstance(src, int):
-            event.ignore()
-            return
-        dest = self._drop_insert_index(event)
-        if dest is None:
-            dest = src
-        event.setDropAction(Qt.DropAction.MoveAction)
-        event.accept()
-        QTimer.singleShot(0, lambda s=src, d=dest: self.steps_moved.emit(s, d))
+        super().mouseMoveEvent(event)
 
-    def _drop_insert_index(self, event) -> int | None:
-        pos = event.position().toPoint()
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._dragging:
+            drop_row = self._drop_row
+            src = self._selected_step_indexes()
+            press_index = self._value_of_row(self._press_row)
+            if press_index is not None and press_index not in src:
+                src = [press_index]  # 拖的没被选中：只搬这一项
+            self._reset_drag()
+            if drop_row is not None and src:
+                dest = self._insert_index_at_row(drop_row)
+                QTimer.singleShot(
+                    0, lambda s=list(src), d=dest: self.steps_moved.emit(s, d)
+                )
+            return
+        self._reset_drag()
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if self._dragging and event.key() == Qt.Key.Key_Escape:
+            self._reset_drag()  # Esc 取消拖拽
+            return
+        super().keyPressEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        """拖拽中也能正常滚轮滚动；滚完按光标重新定位落点。"""
+        super().wheelEvent(event)
+        if self._dragging and self._last_pos is not None:
+            self._drop_row = self._drop_row_at(self._last_pos)
+            self.viewport().update()
+
+    def _reset_drag(self) -> None:
+        self._drag_candidate = False
+        self._dragging = False
+        self._drag_rows = []
+        self._drop_row = None
+        self.viewport().unsetCursor()
+        self.viewport().update()
+
+    def _value_of_row(self, row: int) -> int | None:
+        """行号 → 该行代表的节点下标；章节/分区行或越界返回 None。"""
+        if not (0 <= row < self.count()):
+            return None
+        item = self.item(row)
+        if item is None:
+            return None
+        data = item.data(_ROLE_KIND)
+        if isinstance(data, int) and not isinstance(data, bool):
+            return int(data)
+        return None
+
+    def _drop_row_at(self, pos) -> int:
+        """光标位置 → 插入点行号（插到该行之前；``count()`` 表示追加到末尾）。"""
         item = self.itemAt(pos)
+        if item is None:
+            return 0 if pos.y() < 4 else self.count()
+        row = self.row(item)
+        rect = self.visualItemRect(item)
+        return row + 1 if pos.y() > rect.center().y() else row
+
+    def _insert_index_at_row(self, row: int) -> int:
+        """行号 → nodes[] 插入下标（与旧 dropEvent 的语义一致）。"""
         node_indices = [
-            int(self.item(row).data(_ROLE_KIND))
-            for row in range(self.count())
-            if isinstance(self.item(row).data(_ROLE_KIND), int)
+            int(self.item(r).data(_ROLE_KIND))
+            for r in range(self.count())
+            if isinstance(self.item(r).data(_ROLE_KIND), int)
         ]
         node_count = max(node_indices, default=-1) + 1
+        if row >= self.count():
+            return node_count
+        item = self.item(row)
         if item is None:
             return node_count
         if self._is_chapter(item):
             return 0
-        idx = item.data(_ROLE_KIND)
-        if isinstance(idx, tuple) and len(idx) >= 4 and idx[0] == "structure":
-            return int(idx[3])
-        if not isinstance(idx, int):
-            return node_count
-        indicator = self.dropIndicatorPosition()
-        if indicator == QAbstractItemView.DropIndicatorPosition.BelowItem:
-            return idx + 1
-        return idx
+        data = item.data(_ROLE_KIND)
+        if isinstance(data, tuple) and len(data) >= 4 and data[0] == "structure":
+            return int(data[3])
+        if isinstance(data, int) and not isinstance(data, bool):
+            return int(data)
+        return node_count
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if not self._dragging:
+            return
+        painter = QPainter(self.viewport())
+        try:
+            for row in self._drag_rows:
+                item = self.item(row)
+                if item is not None:
+                    painter.fillRect(self.visualItemRect(item), self._DRAG_HIGHLIGHT)
+            y = self._drop_line_y()
+            if y is not None:
+                painter.setPen(QPen(self._DROP_LINE, 2))
+                painter.drawLine(0, y, self.viewport().width(), y)
+        finally:
+            painter.end()
+
+    def _drop_line_y(self) -> int | None:
+        row = self._drop_row
+        if row is None:
+            return None
+        if row >= self.count():
+            if self.count() == 0:
+                return 0
+            return self.visualItemRect(self.item(self.count() - 1)).bottom()
+        return self.visualItemRect(self.item(row)).top()
 
 _crash_logging_installed = False
 
@@ -899,6 +999,11 @@ class MainWindow(
         self._prompt_on_discard = True  # 测试可关：有未保存修改时的确认弹窗
         self._source_kind = "untitled"
         self._source_path: Path | None = None
+        # 项目「原始来源」：只在真正打开/新建项目时更新，保存单个章节不会改动它。
+        # 用来判断当前是「文件夹 / 多文件项目」还是「单个 story」，避免保存章节后
+        # 把「上次打开」降级成那个单文件（否则下次启动只会打开它，而不是整个文件夹）。
+        self._project_origin = "untitled"
+        self._project_origin_path: Path | None = None
         # 步骤剪贴板：存被复制节点的深拷贝，粘贴时在目标位置插入并重新编号。
         # 只放在内存里，不写系统剪贴板——步骤是结构化数据，走系统剪贴板会和
         # 文本粘贴互相干扰，也容易被别的程序覆盖。
@@ -1700,6 +1805,22 @@ class MainWindow(
         self._refresh_all(select_row=self._selected_node_index())
         self.statusBar().showMessage(t("tests.saved", count=len(tests)), 3000)
 
+    def _project_assets_root(self, source: Path) -> Path:
+        """从项目源路径推出 mod 根目录（``assets/`` 所在的那一层）。
+
+        文件夹项目里 ``_source_path`` 就是用户选中的**目录**，它可能是 mod 根
+        （内含 ``story/`` 与 ``assets/``）、``story/`` 子目录，或直接就是一个存放
+        剧情 JSON 的普通文件夹。旧实现一律按「文件」处理（取 ``source.parent``），
+        于是选了 mod 根时会算到它的上级目录，导致导出的包里漏掉 assets/。
+        """
+        if source.is_file():
+            parent = source.parent
+            return parent.parent if parent.name.lower() == "story" else parent
+        for candidate in (source, source / "story"):
+            if (candidate / "assets").is_dir():
+                return candidate
+        return source.parent.parent if source.name.lower() == "story" else source
+
     def _project_bundled_assets(self) -> list[str] | None:
         source = self._source_path
         if source is None:
@@ -1716,7 +1837,7 @@ class MainWindow(
             except Exception as exc:
                 self.statusBar().showMessage(f"资产统计无法检查原 Mod 包：{exc}", 5000)
                 return None
-        root = source.parent.parent if source.parent.name.lower() == "story" else source.parent
+        root = self._project_assets_root(source)
         assets = root / "assets"
         if not assets.is_dir():
             return []
@@ -1990,6 +2111,9 @@ class MainWindow(
         self._record_discrete()
         sid = self._current_id
         del self._stories[sid]
+        # 必须连落盘路径一起清掉：否则新建章节时 make_story_id 可能复用同一个 id，
+        # 新章节会继承这里残留的路径，Ctrl+S 直接覆盖掉刚删除的那个文件。
+        self._story_paths.pop(sid, None)
         self._current_id = next(iter(sorted(self._stories)))
         self._refresh_all()
         self.statusBar().showMessage(f"已删除剧情章节 {sid}（可撤销）", 3000)
@@ -2339,20 +2463,33 @@ class MainWindow(
         self.statusBar().showMessage(message, 3000)
 
     def _delete_node(self) -> None:
+        """删除选中步骤；多选时一次删除全部选中（单条撤销记录）。"""
         nodes = self.story.get("nodes", [])
-        row = self._selected_node_index()
-        if not (0 <= row < len(nodes)):
+        indexes = self._selected_node_indexes()
+        if not indexes:
+            current = self._selected_node_index()
+            if 0 <= current < len(nodes):
+                indexes = [current]
+        indexes = sorted({i for i in indexes if 0 <= i < len(nodes)})
+        if not indexes:
             return
-        if len(nodes) <= 1:
+        if len(nodes) - len(indexes) < 1:
             QMessageBox.warning(self, _app_title(), t("error.keep_one_node"))
             return
         self._record_discrete()
         from story_sections import repair_after_delete
-        repair_after_delete(self.story, str(nodes[row].get("id") or ""), nodes)
-        removed = nodes.pop(row)
-        if self.story.get("start") == removed.get("id"):
+        removed_ids = [str(nodes[i].get("id") or "") for i in indexes]
+        # 先按「未删减」的原始列表修分区结构（repair 依赖原下标），再统一移除
+        for removed_id in removed_ids:
+            repair_after_delete(self.story, removed_id, nodes)
+        for i in reversed(indexes):
+            nodes.pop(i)
+        if self.story.get("start") in set(removed_ids):
             self.story["start"] = nodes[0].get("id", "")
-        self._refresh_all(select_row=min(row, len(nodes) - 1))
+        first = indexes[0]
+        self._refresh_all(select_row=min(first, len(nodes) - 1))
+        if len(indexes) > 1:
+            self.statusBar().showMessage(t("nav.deleted_many", n=len(indexes)), 2500)
 
     def _follow_start_on_front_change(self, old_front_id: str) -> None:
         """节点在列表第 0 位附近移动后，让起始步骤跟随新的第 0 位。
@@ -2445,24 +2582,37 @@ class MainWindow(
         finally:
             self.node_list.blockSignals(False)
 
-    def _on_steps_moved(self, from_index: int, insert_index: int) -> None:
+    def _on_steps_moved(self, from_index, insert_index: int) -> None:
+        """步骤拖放：from_index 可为单个下标或选中下标列表（多选整块搬移）。"""
         nodes = self.story.get("nodes", [])
         if not nodes:
             return
-        if not (0 <= from_index < len(nodes)):
+        if isinstance(from_index, (list, tuple, set)):
+            raw = [int(i) for i in from_index]
+        else:
+            raw = [int(from_index)]
+        selected = sorted({i for i in raw if 0 <= i < len(nodes)})
+        if not selected:
             self._reload_node_list(-1)
             self._load_form()
             return
-        if insert_index == from_index or insert_index == from_index + 1:
-            self._reload_node_list(from_index)
+        plan = models.plan_reorder_nodes(nodes, selected, insert_index)
+        if plan is None:
+            # 原地放下：不产生撤销记录，只把列表从数据重建（防 Qt MoveAction 删行）。
+            self._reload_node_list(selected[0])
             self._load_form()
             return
+        new_order, moved = plan
         self._record_discrete()
         old_front = str(nodes[0].get("id") or "")
-        dest = models.reorder_node(self.story, from_index, insert_index)
+        nodes[:] = new_order
         self._follow_start_on_front_change(old_front)
-        self._refresh_all(select_row=dest)
-        self.statusBar().showMessage(t("nav.moved", n=dest + 1), 2500)
+        self._refresh_all(select_row=moved[0])
+        self._select_node_indexes(moved)
+        if len(moved) > 1:
+            self.statusBar().showMessage(t("nav.moved_many", n=len(moved)), 2500)
+        else:
+            self.statusBar().showMessage(t("nav.moved", n=moved[0] + 1), 2500)
 
     def _rename_current_node(self) -> None:
         node = self._current_node()

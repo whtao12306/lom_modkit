@@ -22,6 +22,30 @@ WORK_DIR = Path.cwd() if models.FROZEN else models.project_root()
 # 单个 story JSON 的读取上限：防止误把巨大的资源 JSON 当剧情读进内存
 MAX_STORY_BYTES = 64 * 1024 * 1024
 
+# 文件名里不能出现的字符（Windows 规则）+ Windows 保留设备名。
+_BAD_FILENAME_CHARS = frozenset('<>:"/\\|?*')
+_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def safe_story_filename(story_id: str) -> str | None:
+    """章节 id → 可安全落盘的文件名；不可用时返回 ``None``。
+
+    章节 id 来自用户自己的 story JSON，载入时并不做格式校验。若直接拼成
+    ``<id>.json``，像 ``../../escape`` 这种 id 会让保存写到项目目录之外。
+    """
+    sid = (story_id or "").strip()
+    if not sid or sid in (".", ".."):
+        return None
+    if sid.endswith((".", " ")) or sid.split(".")[0].upper() in _RESERVED_NAMES:
+        return None
+    if any(ch in _BAD_FILENAME_CHARS or ord(ch) < 32 for ch in sid):
+        return None
+    return f"{sid}.json"
+
 
 def story_json_candidates(root: Path) -> list[Path]:
     """扫描文件夹（含子目录）里真正是剧情的 JSON，跳过 manifest 之类的同级文件。
@@ -371,7 +395,22 @@ class ProjectControllerMixin:
         elif kind == "story":
             if not target.is_file():
                 return False
-            self._load_story_path(target)
+            # 自愈历史遗留：早先保存单章节会把「上次打开」记成这个文件，导致下次
+            # 启动只打开它。若同目录还有别的剧情 JSON，就按工作文件夹整体打开，
+            # 并把记录改回 folder（编辑器已不提供「打开单个文件」入口，不会误伤）。
+            siblings = [
+                p
+                for p in story_json_candidates(target.parent)
+                if p.resolve() != target.resolve()
+            ]
+            if siblings:
+                self._load_story_paths(
+                    story_json_candidates(target.parent),
+                    folder=target.parent,
+                    quiet=True,
+                )
+            else:
+                self._load_story_path(target)
             if not self._story_paths:
                 return False
         else:
@@ -424,13 +463,59 @@ class ProjectControllerMixin:
 
     def save_story(self) -> bool:
         path = self.story_path
-        return self.save_story_as() if path is None else self._write_current_story(path)
+        if path is not None:
+            return self._write_current_story(path)
+        inferred = self._infer_save_path()
+        if inferred is not None:
+            return self._write_current_story(inferred)
+        return self.save_story_as()
+
+    def _infer_save_path(self) -> Path | None:
+        """当前章节还没有磁盘文件时，按项目来源推断落盘位置，避免每次都弹框。
+
+        「文件夹项目」→ 存回该文件夹下的 ``<章节id>.json``；
+        「多文件项目」→ 存回首个文件所在目录。lommod 包与未命名项目没有可推断
+        的位置，仍走「另存为」。目标文件若已存在且不属于本项目，则不动它、退回
+        弹框（避免覆盖来路不明的同名文件）。
+        """
+        kind = getattr(self, "_project_origin", "")
+        src = getattr(self, "_project_origin_path", None)
+        if not self._current_id or src is None:
+            return None
+        # 章节 id 未经校验，不能直接拼路径（见 safe_story_filename）
+        filename = safe_story_filename(self._current_id)
+        if filename is None:
+            return None
+        src = Path(src)
+        base: Path | None = None
+        if kind == "folder" and src.is_dir():
+            base = src
+        elif kind == "files":
+            base = src if src.is_dir() else src.parent
+        if base is None:
+            return None
+        target = base / filename
+        known = {str(p) for p in self._story_paths.values() if p is not None}
+        if target.exists() and str(target) not in known:
+            return None
+        return target
 
     def save_story_as(self) -> bool:
         current = str(self.story_path) if self.story_path else ""
+        # 文件夹/多文件项目另存为时，默认落在项目目录，而不是上次用过的零散目录
+        default_dir = ""
+        kind = getattr(self, "_project_origin", "")
+        src = getattr(self, "_project_origin_path", None)
+        if src is not None and kind in ("folder", "files"):
+            src = Path(src)
+            default_dir = str(src if (kind == "folder" and src.is_dir()) else src.parent)
         path, _ = QFileDialog.getSaveFileName(
             self, "另存为",
-            current or str(Path(self._last_dir("last_story_dir")) / f"{self._current_id}.json"),
+            current
+            or str(
+                Path(default_dir or self._last_dir("last_story_dir"))
+                / (safe_story_filename(self._current_id) or "story.json")
+            ),
             "story JSON (*.json)",
         )
         if not path:
@@ -446,10 +531,19 @@ class ProjectControllerMixin:
         except Exception as exc:
             QMessageBox.critical(self, t("app.title"), t("error.save", error=exc))
             return False
+        in_multi_project = getattr(self, "_project_origin", "") in ("folder", "files")
         self._story_paths[self._current_id] = path
-        self._set_project_source("story", path)
+        # origin=False：保存单个章节不改动「原始来源」，文件夹项目仍是文件夹项目。
+        self._set_project_source("story", path, origin=False)
         self._mark_saved()
-        self._remember_project("story", path, str(self.story.get("title") or path.stem))
+        if in_multi_project:
+            # 关键：不能把「上次打开」降级成这个文件，否则下次启动只会打开它
+            # 而不是整个工作文件夹（用户反馈的「保存后就不再默认打开文件夹」）。
+            self._remember_current_chapter()
+        else:
+            self._remember_project(
+                "story", path, str(self.story.get("title") or path.stem)
+            )
         self.statusBar().showMessage(f"已保存 {path}", 3000)
         return True
 

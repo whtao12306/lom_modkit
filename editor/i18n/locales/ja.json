@@ -1082,5 +1082,6 @@
   "nav.added_death": "死亡画面を追加しました（専用番号 {id}）",
   "nav.added_hide": "{name} の退場を追加しました",
   "form.exit_character": "退場",
-  "form.exit_character_tip": "現在の人物の退場ステップを自動で追加します"
+  "form.exit_character_tip": "現在の人物の退場ステップを自動で追加します",
+  "nav.deleted_many": "{n} 件を削除しました"
 }

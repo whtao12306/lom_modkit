@@ -1943,6 +1943,31 @@ def reorder_node(story: dict, from_index: int, to_index: int) -> int:
     return dest
 
 
+def plan_reorder_nodes(
+    nodes: list, indexes, to_index: int
+) -> tuple[list, list[int]] | None:
+    """纯计算：把选中的一组步骤整体挪到插入点 to_index（移动前下标）。
+
+    返回 (重排后的新列表, 选中项移动后的新下标)。顺序与原来完全一致时返回 None。
+    to_index 与 reorder_node 同语义，是移动前的「间隙」位置（0..len）；
+    选中项保持彼此相对顺序被搬到一起，也就是多选拖拽的整体搬移。
+    """
+    n = len(nodes)
+    sel = sorted({int(i) for i in indexes if 0 <= int(i) < n})
+    if not sel:
+        return None
+    insert = max(0, min(int(to_index), n))
+    sel_set = set(sel)
+    moving = [nodes[i] for i in sel]
+    rest = [nodes[i] for i in range(n) if i not in sel_set]
+    pos = insert - sum(1 for i in sel if i < insert)
+    pos = max(0, min(pos, len(rest)))
+    new_order = rest[:pos] + moving + rest[pos:]
+    if len(new_order) == n and all(a is b for a, b in zip(new_order, nodes)):
+        return None
+    return new_order, [pos + k for k in range(len(sel))]
+
+
 def make_node_id(story: dict, node_type: str | None = None, prefix: str | None = None) -> str:
     """生成 story 内唯一节点 id：类型 + 该类型次序，例如 say1、show2、choice1。
 

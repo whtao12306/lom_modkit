@@ -122,6 +122,20 @@ _STAGE_POSITIONS_FALLBACK: dict[str, tuple[float, float]] = {
 
 _STAGE_POSITIONS: dict[str, tuple[float, float]] = dict(_STAGE_POSITIONS_FALLBACK)
 
+# 站位锚点的矩形尺寸（舞台单位，1920×1080 参考）。游戏里角色容器整套复制锚点
+# 的 RectTransform（Fungus.PortraitController.SetRectTransform），立绘 Image 设
+# preserveAspect=true 并拉伸填满容器 —— 即在「锚点矩形」内等比缩放居中。
+# 因此立绘的可视高度由该矩形高度决定，而不是固定比例。绝大多数站位是整屏
+# 1920×1080（竖构图立绘按高受限缩放 → 高度正好满屏）。
+_STAGE_BOX_DEFAULT: tuple[float, float] = (1920.0, 1080.0)
+_STAGE_BOX_OVERRIDES: dict[str, tuple[float, float]] = {
+    "BC1": (1920.0, 1920.0),
+    "BC2": (3500.0, 1920.0),
+    "BCB2": (3500.0, 1920.0),
+    "TALK": (1920.0, 1245.0),
+}
+_STAGE_BOXES: dict[str, tuple[float, float]] = dict(_STAGE_BOX_OVERRIDES)
+
 # 颜色
 BG_FALLBACK = QColor(43, 43, 43)  # 无背景图时的深灰底
 DIALOG_BG = QColor(0, 0, 0, 175)  # 对白栏底色
@@ -163,10 +177,11 @@ def load_preview_map(proj_root: Path) -> tuple[dict, Path]:
 def load_stage_positions(proj_root: Path) -> dict[str, tuple[float, float]]:
     """读取 <项目根>/data/stage_positions.json；缺失/损坏时回退内置兜底值。
 
-    表里是 (x 比例, 脚底比例)，权威值由 tools/extract_stage_positions.py 从游戏
-    剧情场景提取；内置兜底值与之一致，保证没有该 JSON 时预览仍正确。
+    表里是 (x 比例, 脚底比例)，并可选带锚点矩形尺寸 ``w``/``h``（舞台单位）；
+    权威值由 tools/extract_stage_positions.py 从游戏剧情场景提取；内置兜底值与
+    之一致，保证没有该 JSON 时预览仍正确。
     """
-    global _STAGE_POSITIONS
+    global _STAGE_POSITIONS, _STAGE_BOXES
     try:
         payload = json.loads(
             (proj_root / "data" / "stage_positions.json").read_text(encoding="utf-8")
@@ -174,29 +189,48 @@ def load_stage_positions(proj_root: Path) -> dict[str, tuple[float, float]]:
         positions = payload.get("positions") if isinstance(payload, dict) else None
         if isinstance(positions, dict):
             merged: dict[str, tuple[float, float]] = {}
+            boxes: dict[str, tuple[float, float]] = dict(_STAGE_BOX_OVERRIDES)
             for name, val in positions.items():
                 if (
                     isinstance(val, dict)
                     and isinstance(val.get("x"), (int, float))
                     and isinstance(val.get("feet"), (int, float))
                 ):
-                    merged[str(name).upper()] = (float(val["x"]), float(val["feet"]))
+                    key = str(name).upper()
+                    merged[key] = (float(val["x"]), float(val["feet"]))
+                    if isinstance(val.get("w"), (int, float)) and isinstance(
+                        val.get("h"), (int, float)
+                    ):
+                        boxes[key] = (float(val["w"]), float(val["h"]))
             if merged:
                 _STAGE_POSITIONS = merged
+                _STAGE_BOXES = boxes
     except Exception:  # noqa: BLE001
         pass
     return _STAGE_POSITIONS
 
 
-def position_anchor(position: str) -> tuple[float, float, bool]:
-    """站位字符串 → (x 比例, 脚底比例, 是否识别)。识别失败兜底中央、脚底在底边。"""
+def position_rect(position: str) -> tuple[float, float, float, float, bool]:
+    """站位字符串 → (x 比例, 脚底比例, 锚点矩形宽, 锚点矩形高, 是否识别)。
+
+    锚点矩形是游戏里角色容器复制的站位 rect（舞台单位，1920×1080 参考）：
+    pivot 在底边中点，立绘在其中 ``preserveAspect`` 等比居中。识别失败时兜底
+    中央、脚底在底边、矩形取整屏尺寸。
+    """
     p = (position or "").strip().upper()
+    box = _STAGE_BOXES.get(p, _STAGE_BOX_DEFAULT)
     entry = _STAGE_POSITIONS.get(p)
     if entry is not None:
-        return entry[0], entry[1], True
+        return entry[0], entry[1], box[0], box[1], True
     if p in ("M", "C"):
-        return 0.5, 1.002778, True
-    return 0.5, 1.002778, False
+        return 0.5, 1.002778, box[0], box[1], True
+    return 0.5, 1.002778, _STAGE_BOX_DEFAULT[0], _STAGE_BOX_DEFAULT[1], False
+
+
+def position_anchor(position: str) -> tuple[float, float, bool]:
+    """站位字符串 → (x 比例, 脚底比例, 是否识别)。识别失败兜底中央、脚底在底边。"""
+    x, feet, _w, _h, known = position_rect(position)
+    return x, feet, known
 
 
 def position_x(position: str) -> tuple[float, bool]:
@@ -1470,7 +1504,10 @@ class StagePreview(QWidget):
         actors = self._state.get("actors", {})
         if not actors:
             return
-        h = floor(rect.height() * 0.78)  # 立绘高度
+        # 游戏模型：角色容器整套复制站位锚点的 RectTransform（pivot 在底边中点），
+        # 立绘 Image 设 preserveAspect=true 并被拉伸填满容器 → 在「锚点矩形」里
+        # 等比缩放居中。所以立绘高度由锚点矩形高度决定，而不是固定比例。
+        unit = rect.width() / 1920.0  # 舞台单位（1920 参考宽）→ 预览像素
         # 越靠后的行 feet 越大（脚底越靠下），先画（在底层）；同层按 x 从左到右。
         ordered = sorted(
             actors.items(),
@@ -1482,40 +1519,45 @@ class StagePreview(QWidget):
         unknown: list[str] = []
         for cid, info in ordered:
             pos = info.get("position", "")
-            frac, known = position_x(pos)
-            feet = position_feet(pos)
+            frac, feet, box_w, box_h, known = position_rect(pos)
             if not known:
                 unknown.append(pos or "（空）")
-            cx = rect.x() + floor(rect.width() * frac)
-            cx += floor(float(info.get("offset_x", 0)))
-            # 脚底 y = 画面顶部 + feet*高度；叠手工偏移（offset_y 为正表示向上）
-            actor_baseline = rect.top() + floor(rect.height() * feet)
-            actor_baseline -= floor(float(info.get("offset_y", 0)))
+            body_scale, art_facing = self._character_look(cid)
+            scale = max(0.05, float(body_scale) / 100.0)
+            bw = max(1.0, box_w * unit * scale)
+            bh = max(1.0, box_h * unit * scale)
+            anchor_x = rect.x() + rect.width() * frac + float(info.get("offset_x", 0))
+            # 锚点 = 容器底边中点（脚底站位点）；offset_y 为正表示向上
+            anchor_y = (
+                rect.top() + rect.height() * feet - float(info.get("offset_y", 0))
+            )
             facing = info.get("facing", "right")
             portrait = info.get("portrait", "normal")
-            body_scale, art_facing = self._character_look(cid)
-            draw_h = max(8, floor(h * body_scale / 100.0))
             pix = self._load_pixmap(self._portrait_path(cid, portrait))
             p.save()
-            p.translate(cx, actor_baseline)
+            p.translate(anchor_x, anchor_y)  # 以下都用「相对锚点」坐标
             p.rotate(float(info.get("rotation", 0)))
             if info.get("shocked"):
                 p.translate(5, -3)
             if info.get("dimmed"):
                 p.setOpacity(0.52)
-            if not pix.isNull():
-                scaled = pix.scaledToHeight(
-                    draw_h, Qt.TransformationMode.SmoothTransformation
-                )
+            # 容器矩形：pivot 在底边中点 → 相对锚点是 [-bw/2, bw/2] × [-bh, 0]
+            box = QRectF(-bw / 2.0, -bh, bw, bh)
+            if not pix.isNull() and pix.width() > 0 and pix.height() > 0:
                 want_left = facing == "left"
                 art_left = art_facing != "right"
                 if want_left != art_left:
-                    scaled = scaled.transformed(QTransform().scale(-1, 1))
+                    # 容器以锚点竖轴为中心，镜像后仍落在同一位置
+                    p.scale(-1.0, 1.0)
+                k = min(bw / pix.width(), bh / pix.height())  # preserveAspect 等比居中
+                dw, dh = pix.width() * k, pix.height() * k
                 p.drawPixmap(
-                    -scaled.width() // 2, -scaled.height(), scaled
+                    QRectF(-dw / 2.0, -bh / 2.0 - dh / 2.0, dw, dh),
+                    pix,
+                    QRectF(pix.rect()),
                 )
             else:
-                self._paint_actor_placeholder(p, 0, 0, draw_h, cid, portrait)
+                self._paint_actor_placeholder(p, box, cid, portrait)
             p.restore()
         if unknown:
             # 未识别站位：角落小字标注原值
@@ -1619,21 +1661,20 @@ class StagePreview(QWidget):
                 p.restore()
 
     def _paint_actor_placeholder(
-        self, p: QPainter, cx: int, baseline: int, h: int, cid: str, portrait: str
+        self, p: QPainter, box: QRectF, cid: str, portrait: str
     ) -> None:
-        w = floor(h * 0.45)
-        box = QRect(cx - w // 2, baseline - h, w, h)
+        """没有立绘素材时，按锚点容器矩形画占位框（与游戏容器同尺寸）。"""
         p.fillRect(box, PLACEHOLDER_BG)
         p.setPen(QPen(PLACEHOLDER_EDGE, 2))
         p.drawRect(box)
         name = models.character_name(self._editor_data, cid)
         p.setPen(QColor(240, 240, 240))
         font = QFont(self.font())
-        font.setPointSizeF(max(9.0, h * 0.045))
+        font.setPointSizeF(max(9.0, box.height() * 0.045))
         font.setBold(True)
         p.setFont(font)
         p.drawText(
-            QRectF(box.adjusted(4, 4, -4, -4)),
+            box.adjusted(4, 4, -4, -4),
             Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
             f"{name}\n（{portrait}）",
         )

@@ -1078,5 +1078,6 @@
   "nav.added_death": "已新增死亡畫面（專用編號 {id}）",
   "nav.added_hide": "已新增 {name} 的人物退場",
   "form.exit_character": "退場",
-  "form.exit_character_tip": "為當前人物自動新增一個「人物退場」步驟"
+  "form.exit_character_tip": "為當前人物自動新增一個「人物退場」步驟",
+  "nav.deleted_many": "已刪除 {n} 個步驟"
 }

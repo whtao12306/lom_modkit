@@ -142,8 +142,13 @@ def test_window_rename_and_drag():
     assert ids[0] == "talk"
     assert ids[1] == first
     assert win.node_list.count() == 1 + len(win.story["nodes"])
+    # 列表标题显示类型中文名（不再显示节点 id）：核对首行数据角色就是重命名后的节点
+    assert win.node_list.item(1).data(main._ROLE_KIND) == 0, (
+        f"拖到最前后首行应对应 talk 节点，实际 {win.node_list.item(1).text()!r}"
+    )
     listed = [win.node_list.item(i).text() for i in range(1, win.node_list.count())]
-    assert any("talk" in line for line in listed), listed
+    talk_title = models.node_list_caption(win.story["nodes"][0], editor_data)[0]
+    assert any(talk_title in line for line in listed), listed
     # 原地放下也必须把列表从数据重建，不能让 Qt MoveAction 删掉那一行
     before_count = win.node_list.count()
     win._on_steps_moved(0, 0)

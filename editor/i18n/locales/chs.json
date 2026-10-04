@@ -1073,5 +1073,6 @@
   "nav.added_death": "已添加死亡画面（专用编号 {id}）",
   "nav.added_hide": "已添加 {name} 的人物退场",
   "form.exit_character": "退场",
-  "form.exit_character_tip": "为当前人物自动添加一个「人物退场」步骤"
+  "form.exit_character_tip": "为当前人物自动添加一个「人物退场」步骤",
+  "nav.deleted_many": "已删除 {n} 个步骤"
 }

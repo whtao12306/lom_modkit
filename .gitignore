@@ -27,3 +27,8 @@ runtime/MortalModHost/test/SmokeTest/obj/
 # tools/ 临时截图（已跟踪的历史截图不受影响）
 tools/tmp_*.png
 .pi/
+# 本地工作记忆目录（项目日志与长期约定，不随仓库分发）
+.workbuddy/
+# 本地测试/构建临时日志
+editor/_*.log
+editor/tests/_*.log

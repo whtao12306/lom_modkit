@@ -117,9 +117,14 @@ class HistoryControllerMixin:
                 log_crash("清除自动恢复副本失败：\n" + traceback.format_exc())
                 self._recovery_error_logged = True
 
-    def _set_project_source(self, kind: str, path: Path | None) -> None:
+    def _set_project_source(self, kind: str, path: Path | None, *, origin: bool = True) -> None:
         self._source_kind = kind
         self._source_path = Path(path).resolve() if path is not None else None
+        if origin:
+            # 「原始来源」只在打开/新建项目时更新；保存单个章节传 origin=False，
+            # 这样文件夹/多文件项目不会被降级成单文件（见 _write_current_story）。
+            self._project_origin = kind
+            self._project_origin_path = self._source_path
 
     def _update_title(self) -> None:
         name = (
